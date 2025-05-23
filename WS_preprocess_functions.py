@@ -108,6 +108,7 @@ def read_raster(path):
     #copy all metadata across 
     raster_data['all metadata']= rst.meta.copy()
     raster_data['bounds'] = rst.bounds
+    raster_data['affine'] = gt
     
     #close the raster
     rst.close()
@@ -352,7 +353,7 @@ def clip_raster_to_box(mask_type, file_in, out_path, epsg_dest, catchment = None
         with rasterio.open(out_path, "w", **out_meta) as dest:
              dest.write(out_img)
         '''
-
+        
 def raster_burner(raster_base_path, out_path, shp, shp_col, reclass = None, 
                   rc_source_col = None, rc_target_col = None, nd_value_in = -9999,
                   nd_value_out = -9999, fa_path = None, fa_threshold = None, 
@@ -440,12 +441,142 @@ def raster_burner(raster_base_path, out_path, shp, shp_col, reclass = None,
         
             
         #include the path pixels
-        if paths_shp is not None: 
+        if paths_shp_path is not None: 
             burned = np.where(path_mask == True, path_value, burned)  
             
         #include the stream pixels
         #These burn on top of paths to ensure priority
         if 'streams_shp' in locals(): 
+            burned = np.where(stream_mask == True, stream_value, burned)
+        
+        #set the out of bounds delineation from the landcover raster 
+        bounds_mask = lc_array == nd_value_in
+        if dtype == 'integer':
+            #use a value of zero for no data
+            burned = np.where(bounds_mask == True, 0, burned)
+        else:
+            #otherwise set to the desired output nodata value
+            burned =  np.where(bounds_mask == True, nd_value_out, burned)
+            
+        #convert to an integer and update relevant metadata
+        if dtype == 'integer':
+            burned = burned.astype(int)
+            meta.update({'dtype':'int16'}) 
+
+        if plot == True:
+            if not os.path.exists(image_folder):
+                os.makedirs(image_folder)
+            f_name = 'C_factor_gif_' + re.findall(r'\d+', out_path)[-1]
+            out_name = os.path.join(image_folder, f_name)
+            plot_image(burned, shp_col, out_name)
+
+        #close the rasterio object but keep the array and updated metadata dictionary
+        out.close()
+        #use the write function to create a new raster with the correct drivers
+        
+        if out_path.endswith('.rst'):
+            driver = 'RST'
+        else:
+            driver = 'GTiff'
+        
+        write_raster(burned, meta, out_path, output_type = driver)
+
+def raster_burner2(raster_base_path, out_path, shp, shp_col, reclass = None, 
+                  rc_source_col = None, rc_target_col = None, nd_value_in = -9999,
+                  nd_value_out = -9999, fa_path = None, fa_threshold = None, 
+                  streams_shp = None, stream_value = -1, paths_shp_path = None, path_value = -10, 
+                  dtype = 'float', plot = False, image_folder = None):
+    #A function to burn a raster with standard dimensions from a shapefile containing 
+    #specific values. The column of the shapefile to burn needs to be specified.
+    
+    #open the template (landcover) raster
+    rst = rasterio.open(raster_base_path)
+    lc_array = rst.read(1)
+
+    #copy metadata to make a target raster
+    meta = rst.meta.copy() 
+    meta.update({'nodata': nd_value_in}) 
+    meta.update({'dtype': dtype}) 
+    print(meta)     
+    rst.close()
+    
+    
+    #create a target raster    
+    
+    with rasterio.open(out_path, 'w+', **meta) as out:
+        #read array (nodata rasterio array)
+        out_arr = out.read(1)
+        # this is where we create a generator of geom, value pairs to use in rasterizing
+        #here the specified column values are attributed to each shape
+        shapes = ((geom,value) for geom, value in zip(shp.geometry, shp[shp_col]))
+        
+        #burn shapefile features onto target array
+        burned = rasterio.features.rasterize(shapes=shapes, fill= nd_value_in, out=out_arr, transform=out.transform)
+        #ensure that array is all float values
+        burned = burned.astype(float)
+        
+        if fa_path is not None and streams_shp is not None:
+            print('Stream shapefile and flow accumulation layer given for streams. Defaulting to flow accumulation.')
+        #get masks of the streams and paths to burn on to the array later
+        if streams_shp is not None:
+            
+            burned_streams = rasterio.features.rasterize(shapes=streams_shp.geometry, fill= nd_value_in,
+                                                         out=out_arr, transform=out.transform, default_value= -555)
+            stream_mask = burned_streams == -555
+            
+        elif fa_path is not None:
+            fa_ = rasterio.open(fa_path)
+            fa_array = fa_.read(1)
+            
+            if not fa_array.shape == lc_array.shape:
+                sys.exit('Mismatch between dimensions of landcover and flow accumulation layer. Check layers.')
+            if fa_threshold >= np.amax(fa_array):
+                fa_threshold = np.amax(fa_array)
+                print('Flow accumulation threshold exceeds layer max. Stream given maximum FA cell value.')
+            #copy metadata to make a target raster
+            fa_meta = fa_.meta.copy()       
+            fa_.close()
+            #create a stream mask where flow accumulation exceeds threshold
+            stream_mask = fa_array >= fa_threshold
+            
+            
+            
+        if paths_shp_path is not None:
+            #open paths shapefile
+            paths_shp = gpd.read_file(paths_shp_path, driver = 'ESRI Shapefile')
+            paths_shp = paths_shp[paths_shp['geometry'] != None]
+            
+            burned_paths = rasterio.features.rasterize(shapes=paths_shp.geometry, 
+                                                       fill= nd_value_in, out=out_arr, transform=out.transform, default_value= -333)
+            path_mask = burned_paths == -333  
+            
+        #if a value reclassification is to be made, enter code section
+        if reclass is not None:
+            #create disctionary of masks 
+            mask_dict = {}
+            #go through a series of mask reclassifications to add permanent lc elements
+            for i in np.arange(len(reclass)):
+                lc_row = reclass.iloc[i]
+                #set the mask where lc value is the desired value and no parcel is present
+                #this prioritises areas with field parcels so that a landcover map only
+                #fills between. The condition is AND. 
+
+                mask = (lc_array == lc_row[rc_source_col]) & (burned == nd_value_in)
+                
+                if mask.sum() > 0:
+                    #if landcover element is present, burn it on to raster
+                    burned = np.where(mask == True, float(lc_row[rc_target_col]), burned)
+                    #store masks as a dictionary 
+                    mask_dict[lc_row['Description']] = mask
+        
+            
+        #include the path pixels
+        if paths_shp_path is not None: 
+            burned = np.where(path_mask == True, path_value, burned)  
+            
+        #include the stream pixels
+        #These burn on top of paths to ensure priority
+        if streams_shp  is not None: 
             burned = np.where(stream_mask == True, stream_value, burned)
         
         #set the out of bounds delineation from the landcover raster 
@@ -517,13 +648,29 @@ def check_dynamic_cfactor(slr_ts_event, RE_col):
     return c_parcels
     
     
-def get_zonal_stats(raster_path, gdf_path):
+def get_zonal_stats(raster_path, gdf_path, nd_value = None, ero_dep = None,
+                    remove_extremes = False):
     #example: https://gis.stackexchange.com/questions/297076/how-to-calculate-mean-value-of-a-raster-for-each-polygon-in-a-shapefile
     gdf = gpd.read_file(gdf_path)
     with rasterio.open(raster_path) as src:
         affine = src.transform
         array = src.read(1)
-        df_zonal_stats = pd.DataFrame(zonal_stats(gdf, array, affine=affine))
+            
+        if nd_value is not None:
+            array = np.where(array == nd_value, 0, array)
+            
+        if ero_dep is not None:
+            if ero_dep == 'erosion':
+                array = np.where(array < 0, array, 0)
+            elif ero_dep == 'deposition':
+                array = np.where(array > 0, array, 0)
+                
+        if remove_extremes == True:
+            array = np.where(array < -30, 0, array)
+            array = np.where(array < 30, array, 0)
+                
+        df_zonal_stats = pd.DataFrame(zonal_stats(gdf, array, affine=affine,
+                                                  stats=['min', 'max', 'median', 'mean', 'sum', 'count']))
 
     gdf2 = pd.concat([gdf, df_zonal_stats], axis=1) 
     

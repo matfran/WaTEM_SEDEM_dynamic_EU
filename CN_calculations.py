@@ -13,9 +13,9 @@ import warnings
 import os
 import pandas as pd
 
-def extract_CN(parameter_inputs, h_cond, cn_table_p, p_int = 0):
+def extract_CN(parameter_inputs, h_cond, p_int = 0):
     
-    cn_table_p = 'CN_parameter_values.csv'
+    cn_table_p = r'C:\Users\u0133999\OneDrive - KU Leuven\PhD\WaTEM_SEDEM_preprocessing\CN_parameter_values.csv'
     cn_table = pd.read_csv(cn_table_p)
     
     cn_table = cn_table[cn_table['Physical intervention'] == p_int]
@@ -380,7 +380,8 @@ def NCRS_CN(landcover_path, parameter_inputs, rf_event_mm, Ia_coeff = 0.2, runof
             duration_d = 0.25
         
         #normalise the runoff coefficient by the event duration in days
-        runoff_grid_out = 1 + (runoff_grid_out/duration_d)
+        #TO CREATE A COEFFICIENT WHICH CONSIDERS DURATION
+        #runoff_grid_out = 1 + (runoff_grid_out/duration_d)
         
         #runoff_grid_out = np.where(runoff_grid_out > 99, 99, runoff_grid_out)
         

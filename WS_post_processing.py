@@ -5,6 +5,7 @@ Created on Thu Apr  6 14:58:46 2023
 @author: u0133999
 """
 import sys
+sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_preprocessing/All_python_scripts')
 from WS_preprocess_functions import read_raster, plot_image, write_raster
 import numpy as np 
 import os
@@ -85,10 +86,8 @@ def aggregate_ws_grids(file_paths, raster_name, cmap = 'Blues', rusle = False,
 
         plot_image(grid_all, name_str = raster_name, vmin = np.nanmin(grid_all), vmax = np.nanmax(grid_all), 
                    export = False, show = True, centre_cmap = True)
-        grid_all_2 = np.where(grid_all > 5, 5, grid_all)
-        grid_all_2 = np.where(grid_all_2 < -5, -5, grid_all_2)
-        
-        plot_image(grid_all_2, name_str = raster_name, vmin = -5, vmax = 5, 
+                
+        plot_image(grid_all, name_str = raster_name, vmin = -5, vmax = 5, 
                    export = False, show = True, centre_cmap = True)
     elif raster_name in ['UPAREA', 'SediExport_kg', 'SediIn_kg', 'SediOut_kg', 'RUSLE']:          
         #rusle_all = np.log10(rusle_all)
@@ -204,7 +203,7 @@ def plot_event_ws(file_paths, r_ts, raster_name = 'RUSLE',
     df_ws_event = df_ws_event.merge(r_ts, on = 'Event_index', how = 'left')
     
     if strip_plot == True:
-        f, ax = plt.subplots(figsize=(25, 15))
+        f, ax = plt.subplots(size=(25, 15))
         sns.despine(f, left=True, bottom=True)
         
         if raster_name == 'Cfactor':

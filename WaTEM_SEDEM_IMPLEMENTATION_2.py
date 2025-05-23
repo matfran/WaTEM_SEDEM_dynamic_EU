@@ -19,6 +19,7 @@ This module handles the data preparation and the export of the model runs. All
 input parameters need to be proprocessed using the 'WS_preprocess_data_layers.py'
 module if they are not already processed.
 
+
 @author: Francis Matthews fmatthews1381@gmail.com
 """
 
@@ -26,6 +27,7 @@ import sys
 import os
 import shutil
 import pandas as pd
+from WS_dynamic_functions import format_catchment_ts,slice_period_to_validation, split_timeseries, modify_channel_extent
 import WS_optimise_v3
 import numpy as np
 import pickle
@@ -35,28 +37,42 @@ cnws_path = 'C:\Workdir\Programs\WS_20062023_depo_limited\cn_ws\cn_ws\cn_ws'
 
 
 slice_to_val_ts = True
-#use 'VanOost2000', 'Dynamic_v1' or 'Dynamic_v5' 
+#use 'VanOost2000', 'Dynamic_v1' (slope - area used in manuscript)
 #Dynamic_v1 is maybe best for splines method
 TC_model = 'Dynamic_v1'
-#give a list of pre-processed catchments to run
-catchments = [9]
+best_params = {'ktc limit': 0.011, 'Parcel connectivity cropland': 90, 'Parcel connectivity forest': 30, 
+               'Parcel trapping efficiency cropland': 0, 'Parcel trapping efficiency forest': 75, 
+               'Parcel trapping efficiency pasture': 75, 'LS correction': 1}
+
+fa_threshold = 669
+#if these are not specified they are determined from the calibration file
+ktc_low_in = None
+ktc_high_in = None
+basic_fit = False
+
+#give a list of pre-processed catchments to run - 6 is the Kinderveld in Belgium
+catchments = [6]
 #An option to implement a train-test split - not used
 train_test_split = False
 #this parameter states that the timeseries will be resmapled to 15-days
 resample = True
-#here it can be specified whether a colibration is run first or, if already run, it can be read only
-calibrate_ws = True
+#here it can be specified whether a callibration is run first or, if already run, it can be read only
+calibrate_ws = False
 #the calibration scalar window increases the search bounds (by x val) if no acceptable range in found.
-cal_window_scalar = 2
+cal_window_scalar = 1.2
 read_calibration = True
-#specify whther to run the multitemporal splines optimisation
+#specify whether to run the multitemporal splines optimisation
 calibrate_splines = True
 #specify the master directory for the outputs
 master_in_folder  = 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_preprocessing/WS_processed_EUSEDcollab'
 #specify the name of the output folder
-master_out_folder  = 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_implementation/EUSEDcollab_results_v4'
-
+master_out_folder  = 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_implementation/EUSEDcollab_results_v5'
 #specify whether to run scenarios
+"""
+ADDITIONAL OPTIONS IF RUNNING MULTIPLE SCENARIOS IN WS. THESE ALLOW THE ASSUMPTION THAT
+CONNECTIVITY PARAMETERS ARE UNKNOWN. SDR (SEDIMENT DELIVERY RATIO) CAN BE FILTERED (TRUE)
+WHICH LIMITS THE EVENTS TO ONLY THOSE WITH CERTAIN SDR LIMITS.
+"""
 run_scenarios = False
 filter_sdr = False
 filter_quantiles = False
@@ -66,9 +82,9 @@ ssl_lower_limit = 0.1
 splines_runs = []
 results = {}
 #initial calibration parameters for the internal calibration process
-cal_params = {'KTcHigh_lower': 0.15625, 'KTcHigh_upper': 2.5, 'KTcLow_lower': 0.078125, 'KTcLow_upper': 1.25, 'steps': 20}
+cal_params = {'KTcHigh_lower': 1.0, 'KTcHigh_upper': 25.0, 'KTcLow_lower': 0.5, 'KTcLow_upper': 12.5, 'steps': 20}
 
-splines_array_in =  None #example input: [116.44745996,  43.28984593,  36.22289995,   0.47231912, 98.93378576,   7.57999032]
+splines_array_in = None
 
 if run_scenarios == True:
     n_iterations = 100
@@ -162,19 +178,28 @@ for ID_eused in catchments:
             WS_preprocess_params['Run type'] = 'Multi-scenario'
         else:
             WS_params['ktc limit'] = 0.011
-            WS_params['Parcel connectivity cropland'] = 95 #90
-            WS_params['Parcel connectivity forest'] = 27 #30
-            WS_params['Parcel trapping efficiency cropland'] = 0 #0
-            WS_params['Parcel trapping efficiency forest'] = 90 #75
-            WS_params['Parcel trapping efficiency pasture'] = 90 #75
-            WS_params['LS correction'] = 1 # set LS cor to 0.3
-            fa_threshold = 7500 #fa
+            WS_params['Parcel connectivity cropland'] = best_params['Parcel connectivity cropland'] #90
+            WS_params['Parcel connectivity forest'] = best_params['Parcel connectivity forest'] #30
+            WS_params['Parcel trapping efficiency cropland'] = best_params['Parcel trapping efficiency cropland'] #0
+            WS_params['Parcel trapping efficiency forest'] = best_params['Parcel trapping efficiency forest'] #75
+            WS_params['Parcel trapping efficiency pasture'] = best_params['Parcel trapping efficiency pasture'] #75
+            WS_params['LS correction'] = 0.7
+            WS_params['Deposition_limit_mm'] = 5
             sdr_threshold = 'None'
+            #use 500 for kind
+            fa_threshold = fa_threshold
             WS_preprocess_params['Flow acc channel threshold'] = fa_threshold
             WS_preprocess_params['SDR ratio threshold'] = sdr_threshold
             WS_preprocess_params['SSL quantile limit'] = 1
             WS_preprocess_params['Run type'] = 'Single-scenario'
-
+        
+        #modify the channel extent according to the desired extent
+        if fa_threshold is not None:
+            file_paths['lc_paths']['ws_lc_original'] = file_paths['lc_paths']['ws_lc']
+            #ensure that new files don't overwrite original
+            file_paths['lc_paths']['ws_lc'] = file_paths['lc_paths']['ws_lc_original'].replace('Landcover', 'Landcover_mod')
+            #write a new landcover layer with modified channels
+            modify_channel_extent(file_paths, fa_threshold)
         
         if filter_ssl == True:
             WS_preprocess_params['SSL lower limit'] = ssl_lower_limit
@@ -200,6 +225,7 @@ for ID_eused in catchments:
         #get the r-factor timeseries
         r_ts = file_paths['dynamic_layers_paths']['r_factor_ts']
         r_ts['Datetime'] = r_ts.index
+        
         
         sim_vs_val_eval = {}
         #slice the simulation period to the validation period
@@ -232,8 +258,6 @@ for ID_eused in catchments:
             r_ts_events_m = r_ts_events_m[r_ts_events_m['SSL (t event-1)'] >= ssl_lower_limit].copy()
             
 
-        #find out if missing events are poor EMO-5 simulations or non-erosive events
-        
         '''
         evaluate the number of simulated and measured events that were matched
         '''
@@ -244,9 +268,9 @@ for ID_eused in catchments:
         sim_vs_val_eval['SSL sum (t whole ts)'] = ts_val_h['SSL (t event-1)'].sum()
         sim_vs_val_eval['SSL sum (t matched events/periods)'] = r_ts_events_m['SSL (t event-1)'].sum()
     
-        
+        #initiate class
         WS_calibrate = WS_optimise_v3.Optimise_dynamic_WS(cnws_path, file_paths, catchment_name, r_ts_events_m, 
-                                                          TC_model, WS_params, WS_preprocess_params)
+                                                          TC_model, 'RE_gauge', WS_params, WS_preprocess_params)
         
         #update the calibration ranges to those of the last model run
         #prevents the range needing to be found each time
@@ -268,9 +292,8 @@ for ID_eused in catchments:
                     WS_calibrate.file_paths = file_paths
                     
             try:
-                cal_params = WS_calibrate.find_ktc_range(capture_pcnt = 40, n_events = 20, fa_threshold = fa_threshold,
-                                                         cal_window_scalar = cal_window_scalar)
-                WS_calibrate.run_ws_calibration(n_cal_steps = 20, n_events = 'All', fa_threshold = fa_threshold)
+                cal_params = WS_calibrate.find_ktc_range(capture_pcnt = 40, n_events = 20, cal_window_scalar = cal_window_scalar)
+                WS_calibrate.run_ws_calibration(n_cal_steps = 20, n_events = 'All')
             except:
                 print('Model run failed to find a calibration range.')
                 continue
@@ -278,7 +301,7 @@ for ID_eused in catchments:
             
         if read_calibration == True:
             try:
-                cal_all = WS_calibrate.process_calibration(plot_ts = False)
+                cal_all = WS_calibrate.process_calibration(plot_ts = True)
                 WS_calibrate.visualise_calibration(cal_all['All event simulations'])
             except:
                 print('Error processing calibration')
@@ -298,20 +321,35 @@ for ID_eused in catchments:
             
         cal_events = list(ts_cal['Event_index'])
         val_events = list(ts_val['Event_index'])
-    
+        
+        if ktc_low_in is not None and ktc_high_in is not None:
+            ktc_low = ktc_low_in
+            ktc_high = ktc_high_in
+        else:
+            ktc_low = WS_calibrate.ktc_low_l
+            ktc_high = WS_calibrate.ktc_high_l
+        
+        if basic_fit == True:
+            basic_calibration = WS_calibrate.run_basic_calibration(v0 = [ktc_high, fa_threshold, 3], r_ts_events_m = ts_cal)
+
         
         if calibrate_splines == True:
             #run the dynamic calibration routine - this only works with a matched sim-obs series
-            WS_cal_splines = WS_calibrate.run_dynamic_calibration(ts_cal, dynamic_channels = False, 
-                                                                      max_fa = 20000, min_fa = 800)
+            WS_cal_splines = WS_calibrate.run_dynamic_calibration(ts_cal)
             WS_calibrate.export_calibration_results(cal_res_folder, splines = True)
         
-    
         
-        if i == n_iterations - 1:
-            WS_predict = WS_optimise_v3.run_ws_prediction(cnws_path, file_paths, catchment_name, TC_model, WS_params = WS_params)
-            WS_results = WS_predict.run_ws(WS_calibrate.ktc_low_l, WS_calibrate.ktc_high_l, event_indexes = val_events)
-            WS_predict.visualise_outputs(r_ts, calibration = True, calibration_events = cal_events)
+        WS_predict = WS_optimise_v3.run_ws_prediction(cnws_path, file_paths, catchment_name, 
+                                                      TC_model, 'RE_gauge', WS_params = WS_params,
+                                                      outfolder_ext = 'run')
+        
+        
+        
+        WS_results = WS_predict.run_ws(ktc_low, ktc_high, 
+                                       event_indexes = val_events, print_sdr = True)
+        
+        WS_predict.visualise_outputs(r_ts, calibration = True, calibration_events = cal_events)
+        
         
         if calibrate_splines == True:
             splines_array = WS_calibrate.splines_parameters_transformed
@@ -319,8 +357,8 @@ for ID_eused in catchments:
             splines_array = splines_array_in
             
         try:
-            WS_val_splines = WS_calibrate.run_dynamic_calibration(ts_val, dynamic_channels = False, 
-                                                                  run_one = True, v_fitted = splines_array)
+            WS_val_splines = WS_calibrate.run_dynamic_calibration(ts_val, run_one = True, v_fitted = splines_array)
+            WS_results_splines = WS_val_splines['ws obs ts']
         except:
             splines_runs.append(TC_model + ' failed splines run')
                 
@@ -333,6 +371,8 @@ for ID_eused in catchments:
         else:
             pickle_p = os.path.join(cal_res_folder, f'WS_single_scenario_{TC_model}_ID_{id_ }.pickle')
         pickle.dump(results, open(pickle_p, 'wb'))
+        
+        
 
 
 

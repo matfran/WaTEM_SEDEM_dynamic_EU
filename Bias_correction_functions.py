@@ -5,29 +5,12 @@ Created on Mon Apr  3 11:52:16 2023
 @author: u0133999
 """
 import pandas as pd 
-import geopandas as gpd
-import seaborn as sns 
 import numpy as np
-import matplotlib.pyplot as plt
-import sys
-import os 
 import re
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel, RationalQuadratic, WhiteKernel, ExpSineSquared, DotProduct 
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn import metrics
-from sklearn.preprocessing import StandardScaler  
-from sklearn.neural_network import MLPRegressor
-from scipy import stats
+
 
 def ei30_from_ts(emo5_pr_st, EnS, col_name, alpha_m, beta_m, time_resolution = 6):
-    
-    
-    
     '''
-    
     To do:
         
         Automate the EnS selection

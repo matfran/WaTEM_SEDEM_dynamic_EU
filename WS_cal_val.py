@@ -13,6 +13,7 @@ import matplotlib.gridspec as gridspec
 from sklearn import metrics
 import numpy as np
 from scipy import stats
+import hydroeval as he
 
 
 
@@ -50,7 +51,7 @@ def calibrate_lumped_emo_precip(ts_val_all, ts_sim_all):
     sim_per_ktc_group = sim_per_ktc_group.sort_values('abs(sim - obs (t))')
     return sim_per_ktc_group
 
-def calibrate_lumped_catch_precip(ws_obs_ts):
+def calibrate_lumped_catch_precip(ws_obs_ts, plot_sdr = False, out_path = None):
     """
     Calibrate the model in a lumped way. This takes the whole time series 
     of catchment runoff/sediment export events and the timeseries of WaTEM-SEDEM
@@ -77,7 +78,7 @@ def calibrate_lumped_catch_precip(ws_obs_ts):
     ws_obs_ts = ws_obs_ts[ws_obs_ts['SSL (t event-1)'].notna()]
     sum_sl_t = ws_obs_ts['SSL (t event-1)'].sum()
     #group event sediment yield 
-    cols = ['tot_erosion', 'tot_sedimentation', 'sed_noriver', 'sed_buffer', 
+    cols = ['tot_erosion', 'tot_sedimentation', 'sed_river', 'sed_noriver', 'sed_buffer', 
             'sed_openwater', 'SSL-WS (t event-1)', 'SSL (t event-1)']
     
     
@@ -86,11 +87,18 @@ def calibrate_lumped_catch_precip(ws_obs_ts):
     ktc_grouped = ktc_grouped[ktc_grouped['SSL-WS (t event-1)'] > 1]
     ktc_grouped['sim - obs (t)'] = (ktc_grouped['SSL-WS (t event-1)']) - ktc_grouped['SSL (t event-1)']
     ktc_grouped['abs(sim - obs (t))'] = abs(ktc_grouped['sim - obs (t)']) 
+    ktc_grouped['SDR'] = ktc_grouped['SSL-WS (t event-1)'] / ((ktc_grouped['tot_erosion'] / -1000))
     ktc_grouped = ktc_grouped.sort_values('abs(sim - obs (t))')
+    
+    if plot_sdr == True:
+        fig, ax = plt.subplots(figsize = (20,7))
+        sns.histplot(data = ktc_grouped, x = 'SDR', y = 'ktc_high', ax = ax)
+        out_path = os.path.join(out_path, 'SDR_KTC_lumped_calibration.png')
+        plt.savefig(out_path)    
 
     return ktc_grouped
 
-def calibrate_event_catch_precip(ws_obs_ts):
+def calibrate_event_catch_precip(ws_obs_ts, objective_function = 'RSME_events', ascending = False):
     """
     Calibrate the model on a per-event. This takes the whole time series 
     of catchment runoff/sediment export events and the timeseries of WaTEM-SEDEM
@@ -125,6 +133,7 @@ def calibrate_event_catch_precip(ws_obs_ts):
     mae_events = []
     rmse_events = []
     total_diff_events = []
+    kge_events = []
     
     #iterate through ktc pairs and evaluate
     for i in np.arange(len(ktc_pairs)):
@@ -142,16 +151,19 @@ def calibrate_event_catch_precip(ws_obs_ts):
         mae = eval_['MAE']
         rmse = eval_['RMSE']
         total_diff = eval_['Total diff']
+        kge = eval_['KGE efficiency']
         
         mae_events.append(mae)
         rmse_events.append(rmse)
         total_diff_events.append(total_diff)
+        kge_events.append(kge)
     
     ktc_pairs['MAE_events'] = mae_events
     ktc_pairs['RMSE_events'] = rmse_events
     ktc_pairs['Total diff'] = total_diff_events
-    
-    ktc_pairs = ktc_pairs.sort_values('RMSE_events')
+    ktc_pairs['KGE efficiency_events'] = kge_events
+    #sort by objective function
+    ktc_pairs = ktc_pairs.sort_values(objective_function, ascending = ascending)
     
     return ktc_pairs
 
@@ -349,16 +361,21 @@ def get_metrics(y_obs, y_sim, name = 'Catchment', print_ = False):
         total_diff = abs(ws_total - obs_total)
     except:
         total_diff = None
-    
+        
+    try:
+        kge, r, alpha, beta = he.evaluator(he.kge, y_sim, y_obs)
+        kge = kge[0]
+    except:
+        kge = None
     
     keys = ['Catchment name', 'n', 'MAE', 'MSE', 'RMSE', 'MAPE', 'SR scipy', 
             'R2 scipy', 'NSE', 'NSE_log', 'Skew observation', 'Skew simulation',
             'WS_total_load', 'Obs_total_load', 'Total diff', 'R2_log scipy',
-            'Pearson_all', 'Pearson_all_log']
+            'Pearson_all', 'Pearson_all_log', 'KGE efficiency']
     dic = dict(zip(keys, [name, n, mae, mse, rmse, mape, SR_scipy, 
                           r2_scipy, nse_, nse_log, skew_obs, skew_sim,
                           ws_total, obs_total, total_diff, r2_scipy_log,
-                          r_all, r_log_all]))
+                          r_all, r_log_all, kge]))
     
     return dic
     
@@ -376,16 +393,30 @@ def validate_matched_events(ws_obs_ts, name, ktc_low, ktc_high):
     return dic
 
 
-def analyse_residuals(ws_obs_ts, ktc_low, ktc_high, plot = True):
+def analyse_residuals(df, plot = True):
     
-    df = ws_obs_ts[(ws_obs_ts['ktc_low'] == ktc_low) & (ws_obs_ts['ktc_high'] == ktc_high)].copy()
-
     df['pred-obs (t event-1)'] = df['SSL-WS (t event-1)'] - df['SSL (t event-1)']
+    
+    
+    # Extract season from datetime
+    df['season'] = df['Start timestamp'].dt.month % 12 // 3 + 1  # 1=Winter, 2=Spring, 3=Summer, 4=Autumn
+    
+    # Compute seasonal % bias
+    seasonal_bias = (
+        df.groupby("season").apply(
+            lambda g: (g["pred-obs (t event-1)"].sum() / g["SSL (t event-1)"].sum()) * 100
+        )
+    ).rename("Seasonal % Bias")
+    
+    if plot:
+        seasonal_bias.plot(kind="bar", ylabel="% Bias", title="Average % Seasonal Bias", rot=0)
+        plt.xticks(ticks=range(4), labels=["Winter", "Spring", "Summer", "Autumn"], rotation=45)
+        plt.show()
     
     try:
         df['tot_erosion'] = df['tot_erosion'] * -1
     except:
-        df['tot_erosion'] = df['Total gross erosion'] * -1
+        df['tot_erosion'] = df['Total gross erosion (kg)'] * -1
     
     try:
         df['pred-obs_ abs (t event-1)/RE'] = df['pred-obs_abs (t event-1)']/df['RE corr']
@@ -400,7 +431,7 @@ def analyse_residuals(ws_obs_ts, ktc_low, ktc_high, plot = True):
     df['SDR_WS'] = df['SSL-WS (t event-1)']/(df['RUSLE_sum'])
     sdr_avg = (df['SSL (t event-1)'].sum())/(df['RUSLE_sum'].sum())
     df['SSL_SDR (t event-1)'] = df['RUSLE_sum'] * sdr_avg
-    df['Deposition prev'] = df['tot_sedimentation'].shift(1)
+    df['Deposition prev'] = df['Total gross deposition (kg)'].shift(1)
     df['Erosion prev'] = df['RUSLE_sum'].shift(1)
     
     if plot == True:
@@ -497,6 +528,8 @@ def analyse_residuals(ws_obs_ts, ktc_low, ktc_high, plot = True):
     results_posterior = {}
     results_posterior['eval_all'] = eval_all
     results_posterior['event data'] = df
+    results_posterior['seasonal bias'] = seasonal_bias
+   
     
     return results_posterior
 

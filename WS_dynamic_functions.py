@@ -6,10 +6,7 @@ Created on Fri Mar 10 14:07:39 2023
 """
 
 import sys
-sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/Fluves_code')
-sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/Data_and_software_resources/Monitored_watershed_data/All_python_scripts')
-sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_preprocessing/All_python_scripts')
-import cnws_kuleuven
+import cnws_fluves
 from EUSEDcollab_time_series_functions import get_catchment_ts
 import os
 import numpy as np

@@ -7,7 +7,7 @@ Created on Thu May 18 14:31:17 2023
 import pandas as pd
 import sys
 import os
-from WS_dynamic_functions import run_WS_dynamic, collect_WS_output, modify_channel_extent, control_splines, export_splines
+from WS_dynamic_functions import run_WS_dynamic, collect_WS_output, modify_channel_extent, control_splines, control_params, export_splines
 from WS_post_processing import aggregate_ws_grids, plot_event_ws, compare_event_distributions, merge_sim_obs
 from WS_cal_val import calibrate_lumped_catch_precip, calibrate_event_catch_precip, calibrate_monthly_mean_diff, get_metrics
 from WS_cal_val import evaluate_maximum_efficiency, plot_calibration, validate_matched_events, plot_sim_obs_calibrated
@@ -28,7 +28,7 @@ class run_ws_prediction:
     to be initialised with a dictionary of all appropriately formulated file paths 
     and a transport capacity formula.
     """
-    def __init__(self, cnws_path, file_paths, catchment_name, TC_model, 
+    def __init__(self, cnws_path, file_paths, catchment_name, TC_model, RE_name,
                  outfolder_ext = 'run', WS_params = None, WS_preprocess_params = None):
         self.file_paths = file_paths
         self.TC_model = TC_model 
@@ -36,6 +36,7 @@ class run_ws_prediction:
         self.WS_preprocess_params = WS_preprocess_params
         self.cnws_path = cnws_path
         self.catchment_name = catchment_name
+        self.RE_name = RE_name
         
         self.file_paths['out_folder'] = self.file_paths['out_folder'] + '_' + outfolder_ext
         
@@ -54,7 +55,7 @@ class run_ws_prediction:
         
         
         
-    def run_ws(self, ktc_low, ktc_high, fa_threshold = None, n_events = 'All', event_indexes = None): 
+    def run_ws(self, ktc_low, ktc_high, n_events = 'All', event_indexes = None, print_sdr = False): 
         '''
         Run a number of events (n_steps) in predictive mode with a defined 
         parameter set (ktc_low and ktc_high)
@@ -76,16 +77,17 @@ class run_ws_prediction:
             A dataframe with the WS predictions from the desired events
 
         '''
-        if fa_threshold is not None:
-            #write a new landcover layer with modified channels
-            modify_channel_extent(self.file_paths, fa_threshold)
             
         run_WS_dynamic(self.file_paths, self.cnws_path, calibrate = False, n_iterations = n_events, 
                        TC_model = self.TC_model, ktc_low = ktc_low, ktc_high = ktc_high,
-                       event_indexes = event_indexes, WS_params = self.WS_params, RE_name = 'RE corr_gauge')
+                       event_indexes = event_indexes, WS_params = self.WS_params, RE_name = self.RE_name)
         
         
         ws_results_run = collect_WS_output(self.file_paths['out_folder'], calibration = False)
+        
+        if print_sdr == True:
+            sdr = -1 * (ws_results_run[ 'Sediment export via river (kg)'].sum()/ws_results_run[ 'Total gross erosion (kg)'].sum())
+            print('SDR = ' + str(np.around(sdr * 1,2)))
         return ws_results_run
     
     def clear_folder(self):
@@ -150,7 +152,8 @@ class Optimise_dynamic_WS:
     sediment yield data for the catchment of interest.
     """    
     
-    def __init__(self, cnws_path, file_paths, catchment_name, r_ts_events_m, TC_model, WS_params = None, WS_preprocess_params = None):
+    def __init__(self, cnws_path, file_paths, catchment_name, r_ts_events_m, TC_model, RE_name,
+                 WS_params = None, WS_preprocess_params = None):
         #here a set of calibration parameter ranges is given for each TC formula
         ktc_cal_p = {}
         if TC_model in ['VanOost2000']:
@@ -215,6 +218,7 @@ class Optimise_dynamic_WS:
         self.WS_preprocess_params = WS_preprocess_params
         self.cnws_path = cnws_path
         self.catchment_name = catchment_name
+        self.RE_name = RE_name
         
     def update_cal_params(self, previous_prediction, scalar_factor = 2, n_steps = 10):
         '''
@@ -316,18 +320,11 @@ class Optimise_dynamic_WS:
         self.pcnt_in_envelope = (eval_combined['In_envelope'].sum()/len(eval_combined['In_envelope'])) * 100
         self.prev_pred = sum_load
 
-    def find_ktc_range(self, capture_pcnt, n_events = 'All', fa_threshold = None, 
-                       cal_window_scalar = 2):
+    def find_ktc_range(self, capture_pcnt, n_events = 'All', cal_window_scalar = 2):
         #get an initial first-guess parameter set
         pcnt_in_bounds = 0
         count = 0
         
-        if fa_threshold is not None:
-            self.file_paths['lc_paths']['ws_lc_original'] = self.file_paths['lc_paths']['ws_lc']
-            #ensure that new files don't overwrite original
-            self.file_paths['lc_paths']['ws_lc'] = self.file_paths['lc_paths']['ws_lc_original'].replace('Landcover', 'Landcover_mod')
-            #write a new landcover layer with modified channels
-            modify_channel_extent(self.file_paths, fa_threshold)
             
         #find a suitable parameter range for ktc by iteratively increasing the range
         #until a critical percentage of observations sit within the range of simulations
@@ -338,7 +335,7 @@ class Optimise_dynamic_WS:
             
             run_WS_dynamic(self.file_paths, self.cnws_path, calibrate = True, n_iterations = n_events, 
                            TC_model = self.TC_model, ktc_cal_p = self.ktc_cal_p, 
-                           WS_params = self.WS_params)
+                           WS_params = self.WS_params, RE_name = self.RE_name)
             ws_first_guess = collect_WS_output(self.file_paths['out_folder'], calibration = True)
             ws_obs_ts_guess = merge_sim_obs(ws_first_guess, self.r_ts_events_m, calibration = True)
             self.evaluate_calibration(ws_obs_ts_guess)
@@ -354,34 +351,23 @@ class Optimise_dynamic_WS:
             
         self.parameter_range_found = True 
         print('Parameter range found')
-        
-        if fa_threshold is not None:
-            self.file_paths['lc_paths']['ws_lc'] = self.file_paths['lc_paths']['ws_lc_original']
             
         return self.ktc_cal_p
 
     
-    def run_ws_calibration(self, n_cal_steps, n_events = 'All', fa_threshold = None):
+    def run_ws_calibration(self, n_cal_steps, n_events = 'All'):
         self.update_for_simulation(n_steps = n_cal_steps)
         if n_events == 'All':
             n_events = None
         
-        if fa_threshold is not None:
-            self.file_paths['lc_paths']['ws_lc_original'] = self.file_paths['lc_paths']['ws_lc']
-            #ensure that new files don't overwrite original
-            self.file_paths['lc_paths']['ws_lc'] = self.file_paths['lc_paths']['ws_lc_original'].replace('Landcover', 'Landcover_mod')
-            #write a new landcover layer with modified channels
-            modify_channel_extent(self.file_paths, fa_threshold)
             
         #pass a list of only the calibration events to run
         event_indexes = list(self.r_ts_events_m['Event_index'])
         
         run_WS_dynamic(self.file_paths, self.cnws_path, calibrate = True, event_indexes = event_indexes, 
                        TC_model = self.TC_model, ktc_cal_p = self.ktc_cal_p,
-                       WS_params = self.WS_params)
+                       WS_params = self.WS_params, RE_name = self.RE_name)
         
-        if fa_threshold is not None:
-            self.file_paths['lc_paths']['ws_lc'] = self.file_paths['lc_paths']['ws_lc_original']
         
         
     def process_calibration(self, plot_ts = True):
@@ -398,9 +384,10 @@ class Optimise_dynamic_WS:
         cal_all['WS results'] = ws_results_cal
         
         
-        lumped_calibration = calibrate_lumped_catch_precip(ws_obs_ts_cal)
+        lumped_calibration = calibrate_lumped_catch_precip(ws_obs_ts_cal, plot_sdr = plot_ts,
+                                                           out_path = self.file_paths['out_folder'])
         self.lumped_calibration = lumped_calibration
-        event_calibration = calibrate_event_catch_precip(ws_obs_ts_cal)
+        event_calibration = calibrate_event_catch_precip(ws_obs_ts_cal, objective_function = 'KGE efficiency_events')
         self.event_calibration = event_calibration
         monthly_mean_calibration = calibrate_monthly_mean_diff(ws_obs_ts_cal)
         self.monthly_mean_calibration = monthly_mean_calibration
@@ -457,13 +444,9 @@ class Optimise_dynamic_WS:
         return cal_all  
 
     
-    def run_dynamic_calibration(self, r_ts_events_m, dynamic_channels = False, max_fa = None, min_fa = None,
-                                run_one = False, v_fitted = None):
+    def run_dynamic_calibration(self, r_ts_events_m, run_one = False, v_fitted = None):
         
-            
-        if dynamic_channels == True:  
-            if max_fa == None or min_fa == None:
-                sys.exit('Provide minumum and maximum flow accumulation values for the channel extent.')
+
             
         #copy so that changes aren't implemented on original df
         r_ts_events_m_copy = r_ts_events_m.copy()
@@ -473,7 +456,7 @@ class Optimise_dynamic_WS:
             extention = 'dynamic_splines_calibration'
             
         ws_predictor = run_ws_prediction(self.cnws_path, self.file_paths, self.catchment_name, self.TC_model, 
-                                         extention, self.WS_params, self.WS_preprocess_params)
+                                         self.RE_name, extention, self.WS_params, self.WS_preprocess_params)
         
 
         months = range(1, 13)
@@ -487,11 +470,6 @@ class Optimise_dynamic_WS:
         self.total_diff_record = []
         self.rmse_record = []
         
-        if dynamic_channels == True:
-            ws_predictor.file_paths['lc_paths']['ws_lc_original'] = self.file_paths['lc_paths']['ws_lc']
-            #ensure that new files don't overwrite original
-            ws_predictor.file_paths['lc_paths']['ws_lc'] = self.file_paths['lc_paths']['ws_lc_original'].replace('Landcover', 'Landcover_dynamic')
-
         
         def fit_splines(v):
             
@@ -506,18 +484,13 @@ class Optimise_dynamic_WS:
             ws_predictor.clear_folder()
             
             v = control_splines(v)
+            
 
             #b_low = np.array([v[0], v[1], v[2], v[3], v[4]])
             #b_low is a calibrated ration of b_high
             b_high = np.array([v[0], v[1], v[2], v[3], v[4]])
             b_low = b_high /v[5]
             
-            if dynamic_channels == True:
-                fa_vals_s = np.array([v[6], v[7], v[8], v[9], v[10]])
-                #print(fa_vals_s)
-                #uscale the values back to their origninal range
-                fa_vals_us = ((1 - fa_vals_s) * (max_fa - min_fa) + min_fa)
-                #print(fa_vals_us)
             
             y_obs = r_ts_events_m_copy['SSL (t event-1)'].values
             y_pred = []
@@ -536,22 +509,13 @@ class Optimise_dynamic_WS:
                 try:
                     ktc_low = np.dot(new_dsm_mo, b_low)[0]
                     ktc_high = np.dot(new_dsm_mo, b_high)[0]
-                    if dynamic_channels == True:
-                        fa_threshold = np.dot(new_dsm_mo, fa_vals_us)[0]
                 except:
                     return np.nan
                 
-                if dynamic_channels == True:
-                    try:
-                        ws_results = ws_predictor.run_ws(ktc_low, ktc_high, fa_threshold, event_indexes = [idx])
-                    except:
-                        ws_results = ws_predictor.run_ws(ktc_low, ktc_high, fa_threshold, event_indexes = [idx])
-                        
-                else:
-                    try:
-                        ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
-                    except:
-                        ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
+                try:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
+                except:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
                     
                 #the results will will iteratively include each new model run in the output folder
                 ws_results_e = ws_results[ws_results['Event_index'] == idx]
@@ -573,10 +537,7 @@ class Optimise_dynamic_WS:
             
             if run_one == False:
                 if self.dynam_it_count == 0 or self.dynam_it_count % 10 == 0:
-                    if dynamic_channels == True:
-                        f_name = 'Splines_channels__' + self.catchment_name + '_' + self.TC_model + '.csv'
-                    else:
-                        f_name = 'Splines_nochannels__' + self.catchment_name + '_' + self.TC_model + '.csv'
+                    f_name = 'Splines_nochannels__' + self.catchment_name + '_' + self.TC_model + '.csv'
                         
                     folder = 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_implementation/EUSEDcollab_results'
                     path = os.path.join(folder, f_name)
@@ -594,6 +555,7 @@ class Optimise_dynamic_WS:
             print('rmse= ' + str(np.around(rmse, 2)))
             print('mae= ' + str(np.around(mae, 2)))
             print('iteration n: ' + str(self.dynam_it_count))
+            print('total diff (t): ' + str(total_diff))
             self.dynam_it_count = self.dynam_it_count + 1
             self.mape_record.append(mape)
             self.total_diff_record.append(total_diff)
@@ -626,17 +588,8 @@ class Optimise_dynamic_WS:
         
         vc = self.file_paths['input_parameters']['River flow acc threshold']
 
-        if dynamic_channels == True:
-            if vc > max_fa or vc < min_fa:
-                sys.exit('First guess channel extent is outside of the provided bounds.')
-            #rescale the input parameter between 0-1 and inverse it
-            vc_s = 1-((1-0) * ((vc - min_fa)/(max_fa - min_fa)) + 0)
-            #INITIALISE THE MATRIX
-            v0 = [vh_1, vh_1, vh_1, vh_1, vh_1,
-                  vr_0, vc_s, vc_s, vc_s, vc_s, vc_s]
-        else:
-            v0 = [vh_1, vh_1, vh_1, vh_1, vh_1,
-                  vr_0]
+        v0 = [vh_1, vh_1, vh_1, vh_1, vh_1,
+              vr_0]
         
         
         
@@ -663,17 +616,6 @@ class Optimise_dynamic_WS:
         b_high = np.array([v_f[0], v_f[1], v_f[2], v_f[3], v_f[4]])
         ktc_high = np.dot(new_dsm_mo, b_high)
         
-        if dynamic_channels == True:
-            b_flowacc = np.array([v_f[6], v_f[7], v_f[8], v_f[9], v_f[10]])
-            b_flowacc = ((1 - b_flowacc) * (max_fa - min_fa) + min_fa)
-            flow_acc_ = np.dot(new_dsm_mo, b_flowacc)
-            
-            fig, ax = plt.subplots(figsize = (12,8))
-            plt.plot(nd['x'], flow_acc_, color = 'magenta') # ktc_high
-            ax.set_xlabel('Month')
-            ax.set_ylabel('flow_acc')
-            plt.savefig(os.path.join(ws_predictor.file_paths['out_folder'], 'flow_accumulation.png'))
-            plt.show()
             
 
 
@@ -690,7 +632,12 @@ class Optimise_dynamic_WS:
 
         
         ws_results_run = collect_WS_output(ws_predictor.file_paths['out_folder'], calibration = False)
+        
+        sdr = -1 * (ws_results_run[ 'Sediment export via river (kg)'].sum()/ws_results_run[ 'Total gross erosion (kg)'].sum())
+        print('SDR = ' + str(np.around(sdr * 1,2)))
+        
         ws_obs_ts = merge_sim_obs(ws_results_run, r_ts_events_m, calibration = False)
+        
         
         y_obs = ws_obs_ts['SSL (t event-1)'].values
         y_sim = ws_obs_ts['SSL-WS (t event-1)'].values
@@ -698,8 +645,6 @@ class Optimise_dynamic_WS:
         
         plot_sim_obs_calibrated(ws_obs_ts, title = 'Splines calibration')
         
-        if dynamic_channels == True:
-            ws_predictor.file_paths['lc_paths']['ws_lc'] = ws_predictor.file_paths['lc_paths']['ws_lc_original']
             
         #WS_predictor.visualise_outputs(r_ts, r_ts_events_m)
         
@@ -711,6 +656,8 @@ class Optimise_dynamic_WS:
         all_results['spline params original'] = v
         all_results['spline params transformed'] = self.splines_parameters_transformed
         all_results['spline figure data'] = self.df_splines_plot_data
+        all_results['SDR'] = sdr
+        all_results['x'] = res.x
         
         cal_events = list(r_ts_events_m['Event_index'])
         ws_predictor.visualise_outputs(r_ts_events_m, calibration = True, calibration_events = cal_events)
@@ -722,6 +669,251 @@ class Optimise_dynamic_WS:
             pickle_p = os.path.join(ws_predictor.file_paths['out_folder'], 'Spline_calibration.pickle')
             pickle.dump(all_results, open(pickle_p, 'wb'))
             
+        return all_results
+    
+    def run_basic_calibration(self, v0, r_ts_events_m):
+            
+        #copy so that changes aren't implemented on original df
+        r_ts_events_m_copy = r_ts_events_m.copy()
+        
+        extention = 'basic_calibration'
+            
+        ws_predictor = run_ws_prediction(self.cnws_path, self.file_paths, self.catchment_name, self.TC_model, 
+                                         self.RE_name, extention, self.WS_params, self.WS_preprocess_params)
+        
+        
+        self.dynam_it_count = 0
+        self.mape_record = []
+        self.total_diff_record = []
+        self.rmse_record = []
+        self.kge_record = []
+        
+        
+        def fit(v):
+            
+            '''
+            #if no net increase is has been made, don't continue the full number of iterations
+            if self.dynam_it_count >100:
+                diff_50 = sum(np.diff(self.mape_record[-50:]))
+                if diff_50 < 0.5:
+                    return np.nan
+            '''
+            #clear the output folder if it exists
+            ws_predictor.clear_folder()
+            
+            
+            v = control_params(v)
+            
+            
+            ktc_high = v[0]
+            ktc_low = v[0] / v[2]
+            fa = v[1]
+            
+            modify_channel_extent(ws_predictor.file_paths, fa)
+            
+            
+            y_obs = r_ts_events_m_copy['SSL (t event-1)'].values
+            y_pred = []
+            
+            #Loop through each event index value
+            for i in r_ts_events_m_copy['Event_index'].values:
+                idx = i
+                line = r_ts_events_m_copy[r_ts_events_m_copy['Event_index'] == i]
+                rf_id = int(idx)
+                
+                try:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
+                except:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes = [idx])
+                    
+                #the results will will iteratively include each new model run in the output folder
+                ws_results_e = ws_results[ws_results['Event_index'] == idx]
+                
+                y_pred.append(float(ws_results_e['SSL-WS (t event-1)']))
+            
+            r_ts_events_m_copy['SSL-WS (t event-1)'] = y_pred
+            #self.splines_ws_obs_ts = r_ts_events_m_copy
+            
+            global eval_
+            eval_ = get_metrics(y_obs, y_pred, name = 'Splines monthly mean')
+            
+            
+            mae = eval_['MAE']
+            mape = eval_['MAPE']
+            rmse = eval_['RMSE']
+            total_diff = eval_['Total diff']
+            kge = eval_['KGE efficiency']
+            
+            print('v = ' + str(np.around(v,2)))
+            print('rmse= ' + str(np.around(rmse, 2)))
+            print('mae= ' + str(np.around(mae, 2)))
+            print('iteration n: ' + str(self.dynam_it_count))
+            print('total diff (t): ' + str(total_diff))
+            print('KGE: ' + str(kge))
+            print('FA: ' + str(fa))
+            self.dynam_it_count = self.dynam_it_count + 1
+            self.mape_record.append(mape)
+            self.total_diff_record.append(total_diff)
+            self.rmse_record.append(rmse)
+            self.kge_record.append(kge)     
+            
+            
+            return kge * -1
+        
+                
+        v0 = np.log(v0)
+
+        res = scipy.optimize.minimize(fit, v0, method='Nelder-Mead', options={'maxiter': 50}) # This can not handle bounds
+
+        
+        ws_results_run = collect_WS_output(ws_predictor.file_paths['out_folder'], calibration = False)
+        
+        sdr = -1 * (ws_results_run[ 'Sediment export via river (kg)'].sum()/ws_results_run[ 'Total gross erosion (kg)'].sum())
+        print('SDR = ' + str(np.around(sdr * 1,2)))
+        
+        ws_obs_ts = merge_sim_obs(ws_results_run, r_ts_events_m, calibration = False)
+        
+        #WS_predictor.visualise_outputs(r_ts, r_ts_events_m)
+        
+        all_results = {}
+        all_results['ws ts'] = ws_results_run
+        all_results['ws obs ts'] = ws_obs_ts
+        all_results['SDR'] = sdr
+        all_results['eval'] = eval_
+        all_results['x'] = res.x
+        
+        cal_events = list(r_ts_events_m['Event_index'])
+        ws_predictor.visualise_outputs(r_ts_events_m, calibration = True, calibration_events = cal_events)
+
+        pickle_p = os.path.join(ws_predictor.file_paths['out_folder'], 'Basic_calibration.pickle')
+        pickle.dump(all_results, open(pickle_p, 'wb'))
+            
+        return all_results
+    
+    def run_basic_calibration_optuna(self, v0, r_ts_events_m):
+        import optuna
+        from optuna.visualization import plot_param_importances
+        # Copy so that changes aren't implemented on the original df
+        r_ts_events_m_copy = r_ts_events_m.copy()
+        
+        extention = 'basic_calibration'
+        
+        ws_predictor = run_ws_prediction(self.cnws_path, self.file_paths, self.catchment_name, self.TC_model, 
+                                         self.RE_name, extention, self.WS_params, self.WS_preprocess_params)
+        
+        self.dynam_it_count = 0
+        self.mape_record = []
+        self.total_diff_record = []
+        self.rmse_record = []
+        self.kge_record = []
+        
+        def objective(trial):
+            # Suggest values for the parameters
+            ktc_high = trial.suggest_float('ktc_high', 1, 50)  # Log scale for wide range
+            fa = trial.suggest_float('fa', 100, 1000)  # Example range for fa
+            ktc_ratio = trial.suggest_float('ktc_ratio', 2.0, 5.0)  # Example range for ktc_high / ktc_low
+            
+            # Calculate ktc_low based on the ratio
+            ktc_low = ktc_high / ktc_ratio
+            
+            # Modify channel extent
+            modify_channel_extent(ws_predictor.file_paths, fa)
+            
+            # Predict SSL for each event
+            y_obs = r_ts_events_m_copy['SSL (t event-1)'].values
+            y_pred = []
+            
+            for i in r_ts_events_m_copy['Event_index'].values:
+                idx = i
+                line = r_ts_events_m_copy[r_ts_events_m_copy['Event_index'] == i]
+                rf_id = int(idx)
+                
+                try:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes=[idx])
+                except:
+                    ws_results = ws_predictor.run_ws(ktc_low, ktc_high, event_indexes=[idx])
+                
+                ws_results_e = ws_results[ws_results['Event_index'] == idx]
+                y_pred.append(float(ws_results_e['SSL-WS (t event-1)']))
+            
+            r_ts_events_m_copy['SSL-WS (t event-1)'] = y_pred
+            
+            # Evaluate metrics
+            global eval_
+            eval_ = get_metrics(y_obs, y_pred, name='OPTUNA')
+            
+            mae = eval_['MAE']
+            mape = eval_['MAPE']
+            rmse = eval_['RMSE']
+            total_diff = eval_['Total diff']
+            kge = eval_['KGE efficiency']
+            
+            # Log metrics
+            trial.set_user_attr('mae', mae)
+            trial.set_user_attr('mape', mape)
+            trial.set_user_attr('rmse', rmse)
+            trial.set_user_attr('total_diff', total_diff)
+            
+            # Print progress
+            print(f"Trial {trial.number}: ktc_high={ktc_high:.2f}, fa={fa:.2f}, ktc_ratio={ktc_ratio:.2f}")
+            print(f"KGE: {kge:.2f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}")
+            
+            # Return the objective value to minimize
+            return kge 
+        
+        # Create an Optuna study
+        study = optuna.create_study(direction='maximize') 
+        study.optimize(objective, n_trials=30)  # Run 50 trials (adjust as needed)
+        
+        # Retrieve feature importance values
+        param_importances = optuna.importance.get_param_importances(study)
+        
+        # Plot feature importance using Matplotlib
+        fig, ax = plt.subplots(figsize=(8, 6))
+        params = list(param_importances.keys())
+        importance_values = list(param_importances.values())
+        
+        ax.barh(params, importance_values, color='skyblue')
+        ax.set_xlabel('Importance')
+        ax.set_ylabel('Parameters')
+        ax.set_title('Feature Importance from Optuna Optimization')
+        plt.tight_layout()
+
+        plt.show()
+
+        # Get the best parameters
+        best_params = study.best_params
+        print("Best parameters:", best_params)
+        
+        # Run the model with the best parameters
+        ktc_high = best_params['ktc_high']
+        fa = best_params['fa']
+        ktc_ratio = best_params['ktc_ratio']
+        ktc_low = ktc_high / ktc_ratio
+        
+        modify_channel_extent(ws_predictor.file_paths, fa)
+        
+        ws_results_run = collect_WS_output(ws_predictor.file_paths['out_folder'], calibration=False)
+        
+        sdr = -1 * (ws_results_run['Sediment export via river (kg)'].sum() / ws_results_run['Total gross erosion (kg)'].sum())
+        print('SDR = ' + str(np.around(sdr * 1, 2)))
+        
+        ws_obs_ts = merge_sim_obs(ws_results_run, r_ts_events_m, calibration=False)
+        
+        all_results = {
+            'ws ts': ws_results_run,
+            'ws obs ts': ws_obs_ts,
+            'SDR': sdr,
+            'eval': eval_,
+            'best_params': best_params
+        }
+        
+        cal_events = list(r_ts_events_m['Event_index'])
+        ws_predictor.visualise_outputs(r_ts_events_m, calibration=True, calibration_events=cal_events)
+        
+        pickle_p = os.path.join(ws_predictor.file_paths['out_folder'], 'Basic_calibration.pickle')
+        pickle.dump(all_results, open(pickle_p, 'wb'))
+        
         return all_results
     
     def visualise_calibration(self, ws_obs_ts_cal):

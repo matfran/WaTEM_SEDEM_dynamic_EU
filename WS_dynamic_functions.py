@@ -7,6 +7,8 @@ Created on Fri Mar 10 14:07:39 2023
 
 import sys
 sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/Fluves_code')
+sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/Data_and_software_resources/Monitored_watershed_data/All_python_scripts')
+sys.path.insert(0, 'C:/Users/u0133999/OneDrive - KU Leuven/PhD/WaTEM_SEDEM_preprocessing/All_python_scripts')
 import cnws_kuleuven
 from EUSEDcollab_time_series_functions import get_catchment_ts
 import os
@@ -25,7 +27,7 @@ def split_timeseries(r_ts_events_m, method):
     but only allows a solution with a total SSL difference less than 20%.
     '''
     if method == 'random':
-        ts_cal = r_ts_events_m.sample(frac = 0.5, random_state = 1).copy().sort_index()
+        ts_cal = r_ts_events_m.sample(frac = 0.6, random_state = 1).copy().sort_index()
         ts_val = r_ts_events_m[~r_ts_events_m['Event_index'].isin(ts_cal['Event_index'])].copy().sort_index()
     elif method == 'time':
         t_start = r_ts_events_m.index[0]
@@ -55,7 +57,7 @@ def split_timeseries(r_ts_events_m, method):
 
 def run_WS_dynamic(file_paths, cnws_path, calibrate = False, n_iterations = 'All', event_indexes = None, 
                    TC_model = 'Dynamic_v1', RE_name = 'RE', ktc_cal_p = None,
-                   ktc_low = None, ktc_high = None, WS_params = None):
+                   ktc_low = 10, ktc_high = 20, WS_params = None):
     '''
     A function to run the dynamic W/S model. This will iterate through all 
     input events and produce a model simulation. This function is built upon
@@ -70,8 +72,6 @@ def run_WS_dynamic(file_paths, cnws_path, calibrate = False, n_iterations = 'All
     
     if calibrate == False and None in [ktc_low, ktc_high]:
         print('No ktc value pair provided for model outside of calibration-mode. Using default values')
-        ktc_low = 10
-        ktc_high = 20
 
     #get the r-factor time series
     r_factor_ts = file_paths['dynamic_layers_paths']['r_factor_ts']
@@ -127,12 +127,10 @@ def run_WS_dynamic(file_paths, cnws_path, calibrate = False, n_iterations = 'All
         #set transport capacity to the dynamic version
         cnws.ModelOptions['TC model'] = TC_model
         cnws.ModelOptions['L model'] = 'Desmet1996_Vanoost2003' #'Desmet1996_McCool' #'Desmet1996_Vanoost2003'
-        cnws.ModelOptions['S model'] = 'Nearing1997' #'McCool1987' #'Nearing1997'
+        cnws.ModelOptions['S model'] = 'McCool1987' #'McCool1987' #'Nearing1997'
         cnws.ModelOptions['Deposition_limited'] = 1
+        cnws.ModelOptions['Deposition_limit_mm'] = 2
         
-        #THESE PARAMETERS ARE HIGHLY SENSITIVE
-        #cnws.Variables['Max kernel'] = 500
-        #cnws.Variables['Max kernel river'] = 1000
 
         #access the relevant intput layers for each event
         r_factor_ei = int(round(r_factor_ts[r_factor_ts['Event_index'] == event_i][RE_name]))
@@ -186,8 +184,8 @@ def collect_WS_output(events_directory, calibration = False):
     else:
         pattern = "*.txt"
         all_vals = []
-        variables = ['Event_index', 'Total gross erosion', 'Total gross deposition', 'Sediment export via river', 
-                     'Sediment export (other sinks)', 'Sediment in buffers']
+        variables = ['Event_index', 'Total gross erosion (kg)', 'Total gross deposition (kg)', 'Sediment export via river (kg)', 
+                     'Sediment export (other sinks) (kg)', 'Sediment in buffers (kg)']
         for path, subdirs, files in os.walk(events_directory):
             for name in files:
                 if fnmatch(name, pattern):
@@ -218,10 +216,11 @@ def collect_WS_output(events_directory, calibration = False):
                                 
                         all_vals.append(event_vals)
         results = pd.DataFrame(all_vals, columns = variables)
-        results['SSL-WS (kg event-1)'] = results['Sediment export via river']
-        results['SSL-WS (t event-1)'] = (results['Sediment export via river'] / 1000)
+        results['SSL-WS (kg event-1)'] = results['Sediment export via river (kg)']
+        results['SSL-WS (t event-1)'] = (results['Sediment export via river (kg)'] / 1000)
         
     results = results.sort_values('Event_index').reset_index(drop = True)
+    
     
     return results
 
@@ -275,12 +274,24 @@ def modify_channel_extent(file_paths, fa_threshold):
 
 def control_splines(v):
     #Added line to prevent negative values
-    #also prevent the ktc ratio parameter from exiting the range 2:10
+    #also prevent the ktc ratio parameter from exiting the range 2:5
     k = 1. * v[5]
     v = np.exp(v)
-    v[5] = 2 + (10 - 2)/(1 + np.exp(-k))
+    #5 is the upper limit
+    v[5] = 2 + (5 - 2)/(1 + np.exp(-k))
     
     return v
+
+def control_params(v):
+    #Added line to prevent negative values
+    #also prevent the ktc ratio parameter from exiting the range 2:5
+    k = 1. * v[2]
+    v = np.exp(v)
+    #5 is the upper limit
+    v[2] = 2 + (5 - 2)/(1 + np.exp(-k))
+    
+    return v
+
 
 def export_splines(df, path):
 
